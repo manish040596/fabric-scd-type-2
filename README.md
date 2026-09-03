@@ -1,0 +1,1 @@
+# fabric-scd-type-2
