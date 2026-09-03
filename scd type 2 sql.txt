@@ -1,0 +1,85 @@
+-- (Optional) use a schema prefix like dbo.
+-- Tables
+CREATE TABLE dbo.stg_customer (
+    customer_id INT,
+    name VARCHAR(100),
+    address VARCHAR(200),
+    phone VARCHAR(20),
+    last_updated DATETIME2(0)
+);
+
+CREATE TABLE dbo.dim_customer (
+    customer_id INT,
+    name VARCHAR(100),
+    address VARCHAR(200),
+    phone VARCHAR(20),
+    start_date DATETIME2(0),
+    end_date DATETIME2(0) NULL,
+    is_current INT
+);
+GO
+
+-- Procedure: SCD Type 2 upsert
+CREATE OR ALTER PROCEDURE dbo.sp_upsert_customer_scd2
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    ----------------------------------------------------------------
+    -- Step 1: close current versions where any attribute changed
+    ----------------------------------------------------------------
+    ;WITH latest_customer AS (
+        SELECT *
+        FROM (
+            SELECT sc.*,
+                   ROW_NUMBER() OVER (PARTITION BY sc.customer_id
+                                      ORDER BY sc.last_updated DESC) AS rn
+            FROM dbo.stg_customer AS sc
+        ) AS ranked
+        WHERE rn = 1
+    )
+    UPDATE dc
+       SET dc.end_date  = lc.last_updated,
+           dc.is_current = 0
+      FROM dbo.dim_customer AS dc
+      JOIN latest_customer AS lc
+        ON dc.customer_id = lc.customer_id
+       AND dc.end_date IS NULL
+     WHERE ISNULL(dc.name   ,'') <> ISNULL(lc.name   ,'')
+        OR ISNULL(dc.address,'') <> ISNULL(lc.address,'')
+        OR ISNULL(dc.phone  ,'') <> ISNULL(lc.phone  ,'');
+
+    ----------------------------------------------------------------
+    -- Step 2: insert new current versions (new customers or changed)
+    ----------------------------------------------------------------
+    ;WITH latest_customer AS (
+        SELECT *
+        FROM (
+            SELECT sc.*,
+                   ROW_NUMBER() OVER (PARTITION BY sc.customer_id
+                                      ORDER BY sc.last_updated DESC) AS rn
+            FROM dbo.stg_customer AS sc
+        ) AS ranked
+        WHERE rn = 1
+    )
+    INSERT INTO dbo.dim_customer (
+        customer_id, name, address, phone,
+        start_date, end_date, is_current
+    )
+    SELECT lc.customer_id,
+           lc.name,
+           lc.address,
+           lc.phone,
+           lc.last_updated AS start_date,
+           NULL            AS end_date,
+           1               AS is_current
+      FROM latest_customer AS lc
+      LEFT JOIN dbo.dim_customer AS dc
+        ON dc.customer_id = lc.customer_id
+       AND dc.end_date IS NULL
+     WHERE dc.customer_id IS NULL
+        OR ISNULL(dc.name   ,'') <> ISNULL(lc.name   ,'')
+        OR ISNULL(dc.address,'') <> ISNULL(lc.address,'')
+        OR ISNULL(dc.phone  ,'') <> ISNULL(lc.phone  ,'');
+END;
+GO
